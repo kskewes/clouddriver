@@ -906,10 +906,10 @@ class SqlCache(
             chunk.forEach {
               values(
                 ulidValue.toString(),
-                it.id_hash,
-                it.id,
                 it.rel_id_hash,
                 it.rel_id,
+                it.id_hash,
+                it.id,
                 it.rel_agent_hash,
                 it.rel_agent,
                 it.rel_type,
