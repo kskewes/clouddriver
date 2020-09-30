@@ -60,6 +60,7 @@ class SqlCache(
 
   companion object {
     private const val onDemandType = "onDemand"
+    private const val PLACEHOLDER_ID = "invalidId"
 
     private val schemaVersion = SqlSchemaVersion.current()
     private val useRegexp =
@@ -186,13 +187,13 @@ class SqlCache(
    * @param ids the ids
    * @return the items matching the type and ids
    */
-  override fun getAll(type: String, ids: MutableCollection<String?>?): MutableCollection<CacheData> {
+  override fun getAll(type: String, ids: MutableCollection<String>?): MutableCollection<CacheData> {
     return getAll(type, ids, null as CacheFilter?)
   }
 
   override fun getAll(
     type: String,
-    ids: MutableCollection<String?>?,
+    ids: MutableCollection<String>?,
     cacheFilter: CacheFilter?
   ): MutableCollection<CacheData> {
     if (ids.isNullOrEmpty()) {
@@ -207,7 +208,7 @@ class SqlCache(
       return mutableListOf()
     }
 
-    val hashedIds = ids.asSequence().filterNotNull().map { getIdHash(it) }.toList()
+    val hashedIds = ids.asSequence().map { getIdHash(it) }.toList()
     val relationshipPrefixes = getRelationshipFilterPrefixes(cacheFilter)
 
     val result = if (relationshipPrefixes.isEmpty()) {
@@ -239,8 +240,8 @@ class SqlCache(
    * @return the items matching the type and identifiers
    */
   override fun getAll(type: String, vararg identifiers: String?): MutableCollection<CacheData> {
-    val ids = mutableListOf<String?>()
-    identifiers.forEach { ids.add(it) }
+    val ids = mutableListOf<String>()
+    identifiers.filterNotNull().forEach { ids.add(it) }
     return getAll(type, ids)
   }
 
@@ -360,14 +361,14 @@ class SqlCache(
    */
   override fun existingIdentifiers(
     type: String,
-    identifiers: MutableCollection<String?>
+    identifiers: MutableCollection<String>
   ): MutableCollection<String> {
     var selects = 0
     var withAsync = false
     val existing = mutableListOf<String>()
     val batchSize =
       dynamicConfigService.getConfig(Int::class.java, "sql.cache.read-batch-size", 500)
-    val hashedIds = identifiers.asSequence().filterNotNull().map { getIdHash(it) }.toList()
+    val hashedIds = identifiers.asSequence().map { getIdHash(it) }.toList()
 
     if (coroutineContext.useAsync(hashedIds.size, this::useAsync)) {
       withAsync = true
@@ -468,7 +469,11 @@ class SqlCache(
   }
 
   override fun get(type: String, id: String?, cacheFilter: CacheFilter?): CacheData? {
-    val result = getAll(type, mutableListOf(id), cacheFilter)
+    if (id == null) {
+      return null
+    }
+
+    val result = getAll(type, mutableListOf(id) as MutableCollection<String>, cacheFilter)
     return if (result.isEmpty()) {
       null
     } else result.iterator().next()
@@ -742,18 +747,20 @@ class SqlCache(
     currentRevRelTypes.filter { !createdTables.contains(it) }
       .forEach { createTables(it) }
 
-    val oldFwdIds: Map<String, String?> = existingFwdRelKeys
+    val oldFwdIds: Map<String, String> = existingFwdRelKeys
       .asSequence()
-      .map { it.key() to it.uuid }
+      .map {
+        it.key() to it.uuid
+      }
       .toMap()
 
-    val oldRevIds = mutableMapOf<String, String?>()
-    val oldRevIdsToType = mutableMapOf<String, String?>()
+    val oldRevIds = mutableMapOf<String, String>()
+    val oldRevIdsToType = mutableMapOf<String, String>()
 
     existingRevRelKeys
       .forEach {
         oldRevIds[it.key()] = it.uuid
-        oldRevIdsToType[it.key()] = it.rel_agent?.substringBefore(
+        oldRevIdsToType[it.key()] = it.rel_agent.substringBefore(
           delimiter = ":",
           missingDelimiterValue = ""
         )
@@ -765,6 +772,8 @@ class SqlCache(
     // one type and it's provided by the calling caching agent.
     val newFwdRelEntries = mutableListOf<RelEntry>()
     val newRevTypeToRelEntries = mutableMapOf<String, MutableList<RelEntry>>()
+
+    val ulid = ULID()
 
     items
       .filter { it.id != "_ALL_" }
@@ -788,7 +797,7 @@ class SqlCache(
             if (!oldFwdIds.containsKey(fwdKey)) {
               newFwdRelEntries.add(
                 RelEntry(
-                  uuid = null,
+                  uuid = PLACEHOLDER_ID,
                   id_hash = idHash,
                   id = cacheData.id,
                   rel_id_hash = relIdHash,
@@ -805,7 +814,7 @@ class SqlCache(
               newRevTypeToRelEntries.getOrPut(relType) { mutableListOf() }
                 .add(
                   RelEntry(
-                    uuid = null,
+                    uuid = PLACEHOLDER_ID,
                     id_hash = relIdHash,
                     id = relId,
                     rel_id_hash = idHash,
@@ -821,8 +830,6 @@ class SqlCache(
         }
       }
 
-    val now = clock.millis()
-    val ulid = ULID()
     var ulidValue = ulid.nextValue()
 
     newFwdRelEntries.chunked(
@@ -857,7 +864,7 @@ class SqlCache(
               it.rel_agent_hash,
               it.rel_agent,
               it.rel_type,
-              now
+              clock.millis()
             )
             ulidValue = ulid.nextMonotonicValue(ulidValue)
           }
@@ -906,7 +913,7 @@ class SqlCache(
                 it.rel_agent_hash,
                 it.rel_agent,
                 it.rel_type,
-                now
+                clock.millis()
               )
               ulidValue = ulid.nextMonotonicValue(ulidValue)
             }
@@ -1063,7 +1070,7 @@ class SqlCache(
    * @param agentHash the agent hash of the records to retrieve.
    * @return list of resource entries with body hash and id hash populated.
    */
-  private fun getBodyHashesAndIdHashes(type: String, agentHash: String?): List<ResourceEntry> {
+  private fun getBodyHashesAndIdHashes(type: String, agentHash: String?): List<HashedIdAndBody> {
     return withRetry(RetryCategory.READ) {
       jooq
         .select(field("body_hash"), field("id_hash"))
@@ -1072,7 +1079,7 @@ class SqlCache(
           field("agent_hash").eq(agentHash)
         )
         .fetch()
-        .into(ResourceEntry::class.java)
+        .into(HashedIdAndBody::class.java)
     }
   }
 
@@ -1085,14 +1092,14 @@ class SqlCache(
    * @return list of relationship entries with uuid, id hash, rel id hash, and rel agent hash
    * populated.
    */
-  private fun getRelationshipKeys(type: String, relAgentHash: String): MutableList<RelEntry> {
+  private fun getRelationshipKeys(type: String, relAgentHash: String): MutableList<RelEntryHashes> {
     return withRetry(RetryCategory.READ) {
       jooq
         .select(field("uuid"), field("id_hash"), field("rel_id_hash"), field("rel_agent_hash"))
         .from(table(sqlNames.relTableName(type)))
         .where(field("rel_agent_hash").eq(relAgentHash))
         .fetch()
-        .into(RelEntry::class.java)
+        .into(RelEntryHashes::class.java)
     }
   }
 
@@ -1111,7 +1118,7 @@ class SqlCache(
     type: String,
     origType: String,
     relAgentHash: String
-  ): MutableList<RelEntry> {
+  ): MutableList<RelEntryHashesAndAgent> {
     return withRetry(RetryCategory.READ) {
       jooq
         .select(
@@ -1127,7 +1134,7 @@ class SqlCache(
           field("rel_type").eq(origType)
         )
         .fetch()
-        .into(RelEntry::class.java)
+        .into(RelEntryHashesAndAgent::class.java)
     }
   }
 
@@ -1830,32 +1837,59 @@ class SqlCache(
     createdTables.removeAll(tables)
   }
 
-  data class ResourceEntry(
-    val id_hash: String?,
-    val id: String?,
-    val agent_hash: String?,
-    val agent: String?,
-    val application: String?,
-    val body_hash: String?,
-    val body: String?,
-    val last_updated: Long?
+  private data class HashedIdAndBody(
+    val id_hash: String,
+    val body_hash: String
   )
 
-  data class RelEntry(
-    val uuid: String?,
-    val id_hash: String?,
-    val id: String?,
-    val rel_id_hash: String?,
-    val rel_id: String?,
-    val rel_agent_hash: String?,
-    val rel_agent: String?,
-    val rel_type: String?,
-    val last_updated: Long?
-  ) {
+  private interface HashedRelEntry {
+    val uuid: String
+    val id_hash: String
+    val rel_id_hash: String
+    val rel_agent_hash: String
+
     fun key(): String {
       return "$id_hash|$rel_id_hash"
     }
   }
+
+  private data class RelEntryHashes(
+    override val uuid: String,
+    override val id_hash: String,
+    override val rel_id_hash: String,
+    override val rel_agent_hash: String
+  ) : HashedRelEntry
+
+  private data class RelEntryHashesAndAgent(
+    override val uuid: String,
+    override val id_hash: String,
+    override val rel_id_hash: String,
+    override val rel_agent_hash: String,
+    val rel_agent: String
+  ) : HashedRelEntry
+
+  data class ResourceEntry(
+    val id_hash: String,
+    val id: String,
+    val agent_hash: String,
+    val agent: String,
+    val application: String?,
+    val body_hash: String,
+    val body: String,
+    val last_updated: Long?
+  )
+
+  data class RelEntry(
+    override val uuid: String,
+    override val id_hash: String,
+    val id: String,
+    override val rel_id_hash: String,
+    val rel_id: String,
+    override val rel_agent_hash: String,
+    val rel_agent: String,
+    val rel_type: String,
+    val last_updated: Long?
+  ) : HashedRelEntry
 
   data class RelPointer(
     val id: String,
