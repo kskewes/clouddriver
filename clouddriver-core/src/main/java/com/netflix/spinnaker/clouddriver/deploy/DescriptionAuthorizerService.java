@@ -117,7 +117,7 @@ public class DescriptionAuthorizerService {
       fiatPermissionEvaluator.storeWholePermission();
 
       for (String application : applications) {
-        if (!fiatPermissionEvaluator.hasPermission(auth, application, "APPLICATION", "WRITE")) {
+        if (!fiatPermissionEvaluator.hasPermission(auth, application, "APPLICATION", "EXECUTE")) {
           hasPermission = false;
           errors.reject(
               "authorization.application", format("Access denied to application %s", application));
